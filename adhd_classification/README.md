@@ -344,11 +344,17 @@ total_loss = adhd_loss + adv_loss
 
 ## Examples
 
-Run the example scripts to see each step in action:
+### Dummy Data Examples
+
+Run the example scripts to see each step in action with generated dummy data:
 
 ```bash
-# Step 1: TCN baseline
 cd examples
+
+# Sanity check: Test all steps on dummy data
+python sanity_check.py
+
+# Step 1: TCN baseline
 python train_baseline.py
 
 # Step 2: PatchTST encoder
@@ -357,6 +363,26 @@ python train_patchtst.py
 # Step 4: Graph-based model
 python train_graph.py
 ```
+
+### FIF Data Examples
+
+Train on real polysomnography data from .fif files:
+
+```bash
+cd examples
+
+# Simple training with train/val/test split
+python train_fif_simple.py
+
+# 5-fold cross-validation for robust evaluation
+python train_fif_cv.py
+```
+
+**Note**: Update the `fif_directory` path in the scripts to point to your .fif files.
+The FIF files should be MNE-Python epoch files with:
+- PSG data: (n_epochs, n_channels, n_timepoints)
+- ADHD label in metadata: `raw.metadata['ADHD']`
+- Optional sleep stages in events
 
 ## Model Configuration Reference
 
