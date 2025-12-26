@@ -1,0 +1,15 @@
+# Core dependencies
+torch>=1.10.0
+numpy>=1.21.0
+
+# Visualization (optional)
+matplotlib>=3.4.0
+
+# Data handling (optional)
+scikit-learn>=0.24.0
+
+# Progress bars (optional)
+tqdm>=4.62.0
+
+# Logging (optional)
+tensorboard>=2.7.0
