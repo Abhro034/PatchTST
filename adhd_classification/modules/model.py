@@ -188,13 +188,14 @@ class ADHDClassifier(nn.Module):
 
         return heads
 
-    def forward(self, x, stage_labels=None, return_intermediates=False):
+    def forward(self, x, stage_labels=None, attention_mask=None, return_intermediates=False):
         """
         Forward pass.
 
         Args:
             x: [B, E, N, L] - PSG data
             stage_labels: [B, E] - sleep stage labels (optional)
+            attention_mask: [B, E] - mask for padded epochs (1=real, 0=padding)
             return_intermediates: If True, return intermediate tensors
 
         Returns:
@@ -236,10 +237,13 @@ class ADHDClassifier(nn.Module):
 
         intermediates['u'] = u
 
-        # 3. Night Pooling
+        # 3. Night Pooling (with attention mask for padding)
         if hasattr(self.night_pool, 'forward') and 'stage_labels' in self.night_pool.forward.__code__.co_varnames:
-            # Stage-aware pooling
-            z = self.night_pool(u, stage_labels=stage_labels, return_attention=False)
+            # Stage-aware pooling (with mask)
+            z = self.night_pool(u, stage_labels=stage_labels, attention_mask=attention_mask, return_attention=False)
+        elif hasattr(self.night_pool, 'forward') and 'attention_mask' in self.night_pool.forward.__code__.co_varnames:
+            # Regular pooling with mask support
+            z = self.night_pool(u, attention_mask=attention_mask)
         else:
             z = self.night_pool(u)  # [B, D]
 

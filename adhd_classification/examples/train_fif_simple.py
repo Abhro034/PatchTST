@@ -26,19 +26,20 @@ from utils.fif_datamodule import create_dataloaders
 
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
-    """Train one epoch"""
+    """Train one epoch with attention masking for padding"""
     model.train()
     total_loss = 0
     correct = 0
     total = 0
 
     for batch in tqdm(train_loader, desc="Training"):
-        X = batch['X'].to(device)  # [B, E, N, L]
+        X = batch['X'].to(device)  # [B, max_E, N, L]
         y = batch['y'].to(device)  # [B]
+        attention_mask = batch['attention_mask'].to(device)  # [B, max_E]
 
         optimizer.zero_grad()
 
-        output = model(X)
+        output = model(X, attention_mask=attention_mask)
         logits = output['logits'].squeeze(-1)
 
         loss = criterion(logits, y)
@@ -57,7 +58,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
 
 
 def evaluate(model, dataloader, criterion, device):
-    """Evaluate model"""
+    """Evaluate model with attention masking for padding"""
     model.eval()
     total_loss = 0
     correct = 0
@@ -69,8 +70,9 @@ def evaluate(model, dataloader, criterion, device):
         for batch in tqdm(dataloader, desc="Evaluating"):
             X = batch['X'].to(device)
             y = batch['y'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
 
-            output = model(X)
+            output = model(X, attention_mask=attention_mask)
             logits = output['logits'].squeeze(-1)
 
             loss = criterion(logits, y)
@@ -103,10 +105,9 @@ def main():
     # Configuration
     config = {
         'fif_directory': './data/fif_files',  # UPDATE THIS PATH
-        'batch_size': 8,  # Can use larger batch sizes with epoch sampling!
+        'batch_size': 4,  # Subjects per batch (padded to max epochs in batch)
         'num_workers': 0,
-        'num_epochs_sample': 128,  # Sample 128 epochs per subject per batch
-        'sampling_strategy': 'uniform',  # 'uniform', 'random', or 'stage_stratified'
+        'max_epochs_per_batch': 256,  # Max epochs per subject (memory control)
         'step': 4,  # Model step (1-5)
         'num_epochs': 50,
         'lr': 1e-4,
@@ -115,8 +116,10 @@ def main():
     }
 
     print("=" * 80)
-    print("ADHD Classification - Simple Training")
+    print("ADHD Classification - Padding + Masking Approach")
     print("=" * 80)
+    print("\nUsing ALL epochs from each subject with zero-padding and attention masking")
+    print("Padded epochs are masked out and do not contribute to predictions.")
 
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -135,8 +138,7 @@ def main():
             fif_directory=config['fif_directory'],
             batch_size=config['batch_size'],
             num_workers=config['num_workers'],
-            num_epochs_sample=config['num_epochs_sample'],
-            sampling_strategy=config['sampling_strategy']
+            max_epochs_per_batch=config['max_epochs_per_batch']
         )
     except Exception as e:
         print(f"\nERROR loading data: {e}")
@@ -151,10 +153,13 @@ def main():
     print(f"  Channels: {metadata['n_channels']}")
     print(f"  Sequence length: {metadata['seq_len']}")
     print(f"  ADHD: {metadata['adhd_count']}, Control: {metadata['control_count']}")
-    print(f"\n  Epoch Sampling:")
-    print(f"    Epochs per subject per batch: {metadata['num_epochs_sample']}")
-    print(f"    Sampling strategy: {metadata['sampling_strategy']}")
-    print(f"    Effective batch (values): {config['batch_size']} × {metadata['num_epochs_sample']} × {metadata['n_channels']} × {metadata['seq_len']}")
+    print(f"\n  Epoch Statistics:")
+    print(f"    Average epochs/subject: {metadata['avg_epochs_per_subject']:.1f}")
+    print(f"    Max epochs in dataset: {metadata['max_epochs_in_dataset']}")
+    print(f"    Min epochs in dataset: {metadata['min_epochs_in_dataset']}")
+    print(f"    Max epochs per batch: {config['max_epochs_per_batch']}")
+    print(f"\n  Memory estimate (per batch):")
+    print(f"    Max tensor size: [{config['batch_size']}, {min(config['max_epochs_per_batch'], metadata['max_epochs_in_dataset'])}, {metadata['n_channels']}, {metadata['seq_len']}]")
 
     # Create model
     print("\nCreating model...")

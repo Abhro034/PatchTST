@@ -89,13 +89,14 @@ class CrossValidationTrainerADHD:
 
         pbar = tqdm(train_loader, desc="Training", leave=False)
         for batch in pbar:
-            X = batch['X'].to(self.device)  # [B, E, N, L]
+            X = batch['X'].to(self.device)  # [B, max_E, N, L]
             y = batch['y'].to(self.device)  # [B]
+            attention_mask = batch['attention_mask'].to(self.device)  # [B, max_E]
 
             optimizer.zero_grad()
 
-            # Forward
-            output = model(X)
+            # Forward (with attention mask for padding)
+            output = model(X, attention_mask=attention_mask)
             logits = output['logits'].squeeze(-1)  # [B]
 
             loss = criterion(logits, y)
@@ -138,8 +139,9 @@ class CrossValidationTrainerADHD:
         for batch in tqdm(val_loader, desc="Validating", leave=False):
             X = batch['X'].to(self.device)
             y = batch['y'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
 
-            output = model(X)
+            output = model(X, attention_mask=attention_mask)
             logits = output['logits'].squeeze(-1)
 
             loss = criterion(logits, y)

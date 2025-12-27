@@ -194,87 +194,85 @@ class FIFDatasetADHD(Dataset):
         }
 
 
-def collate_fn_adhd(batch, num_epochs_sample=128, sampling_strategy='uniform'):
+def collate_fn_adhd(batch, max_epochs_per_batch=256):
     """
-    Custom collate function with epoch sampling for memory efficiency
+    Custom collate function with padding and masking for variable epoch lengths
+
+    Uses ALL epochs from each subject but pads to equal length within batch.
+    Masks are returned to ignore padding in attention mechanisms.
 
     Args:
         batch: List of subject data dicts
-        num_epochs_sample: Number of epochs to sample per subject (default: 128)
-        sampling_strategy: 'uniform', 'random', or 'stage_stratified'
+        max_epochs_per_batch: Maximum epochs to include per subject (for memory control)
 
     Returns:
-        Batched data with sampled epochs per subject
+        Dict with:
+            - X: [B, max_E, N, L] - Padded epoch data
+            - y: [B] - Subject labels
+            - attention_mask: [B, max_E] - 1 for real epochs, 0 for padding
+            - subject_ids: List of subject IDs
+            - sleep_stages: [B, max_E] - Padded sleep stages
+            - n_real_epochs: [B] - Number of real (non-padded) epochs per subject
     """
     batched_X = []
     batched_y = []
     batched_ids = []
     batched_stages = []
+    n_real_epochs_list = []
+
+    # Find max epochs in batch (cap at max_epochs_per_batch)
+    max_epochs = min(
+        max(item['X'].shape[0] for item in batch),
+        max_epochs_per_batch
+    )
 
     for item in batch:
         X = item['X']  # [E, N, L]
+        stages = item['sleep_stages']  # [E]
         n_epochs = X.shape[0]
 
-        if n_epochs <= num_epochs_sample:
-            # Use all epochs if fewer than target
-            sampled_X = X
-            sampled_stages = item['sleep_stages']
+        # Limit to max_epochs_per_batch if needed
+        if n_epochs > max_epochs_per_batch:
+            X = X[:max_epochs_per_batch]
+            stages = stages[:max_epochs_per_batch]
+            n_epochs = max_epochs_per_batch
+
+        n_real_epochs_list.append(n_epochs)
+
+        # Pad if necessary
+        if n_epochs < max_epochs:
+            pad_size = max_epochs - n_epochs
+            # Pad X with zeros: [pad_size, N, L]
+            X_padded = torch.cat([
+                X,
+                torch.zeros(pad_size, X.shape[1], X.shape[2], dtype=X.dtype)
+            ], dim=0)
+            # Pad stages with zeros
+            stages_padded = torch.cat([
+                stages,
+                torch.zeros(pad_size, dtype=stages.dtype)
+            ], dim=0)
         else:
-            # Sample epochs based on strategy
-            if sampling_strategy == 'uniform':
-                # Uniformly sample across the night
-                step = n_epochs / num_epochs_sample
-                indices = torch.tensor([int(i * step) for i in range(num_epochs_sample)])
+            X_padded = X
+            stages_padded = stages
 
-            elif sampling_strategy == 'random':
-                # Random sampling (default behavior)
-                indices = torch.randperm(n_epochs)[:num_epochs_sample]
-
-            elif sampling_strategy == 'stage_stratified':
-                # Sample proportionally from each sleep stage
-                stages = item['sleep_stages']
-                indices = []
-
-                # Get unique stages and their counts
-                unique_stages = torch.unique(stages)
-                epochs_per_stage = num_epochs_sample // len(unique_stages)
-
-                for stage in unique_stages:
-                    stage_indices = torch.where(stages == stage)[0]
-                    if len(stage_indices) > 0:
-                        n_sample = min(epochs_per_stage, len(stage_indices))
-                        sampled = stage_indices[torch.randperm(len(stage_indices))[:n_sample]]
-                        indices.extend(sampled.tolist())
-
-                # If we haven't reached target, randomly sample remaining
-                while len(indices) < num_epochs_sample:
-                    remaining = num_epochs_sample - len(indices)
-                    all_indices = set(range(n_epochs))
-                    available = list(all_indices - set(indices))
-                    if not available:
-                        break
-                    additional = np.random.choice(available, min(remaining, len(available)), replace=False)
-                    indices.extend(additional.tolist())
-
-                indices = torch.tensor(indices[:num_epochs_sample])
-
-            else:
-                raise ValueError(f"Unknown sampling_strategy: {sampling_strategy}")
-
-            sampled_X = X[indices]
-            sampled_stages = item['sleep_stages'][indices]
-
-        batched_X.append(sampled_X)
+        batched_X.append(X_padded)
         batched_y.append(item['y'])
         batched_ids.append(item['subject_id'])
-        batched_stages.append(sampled_stages)
+        batched_stages.append(stages_padded)
+
+    # Create attention mask: 1 for real epochs, 0 for padding
+    attention_mask = torch.zeros(len(batch), max_epochs, dtype=torch.float32)
+    for i, n_real in enumerate(n_real_epochs_list):
+        attention_mask[i, :n_real] = 1.0
 
     return {
-        'X': torch.stack(batched_X),  # [B, E_sampled, N, L]
+        'X': torch.stack(batched_X),  # [B, max_E, N, L]
         'y': torch.stack(batched_y).squeeze(-1),  # [B]
+        'attention_mask': attention_mask,  # [B, max_E]
         'subject_ids': batched_ids,
-        'sleep_stages': torch.stack(batched_stages),  # [B, E_sampled]
-        'num_epochs_sampled': num_epochs_sample
+        'sleep_stages': torch.stack(batched_stages),  # [B, max_E]
+        'n_real_epochs': torch.tensor(n_real_epochs_list, dtype=torch.long)  # [B]
     }
 
 
@@ -306,135 +304,41 @@ def train_test_split_subjects(
     return train_idx, val_idx, test_idx
 
 
-def evaluate_subject_full(model, subject_data, device, num_epochs_per_batch=128):
+def create_collate_fn(max_epochs_per_batch=256):
     """
-    Evaluate a subject by aggregating predictions over all epochs
+    Create a collate function with fixed max_epochs parameter
 
     Args:
-        model: ADHDClassifier model
-        subject_data: Dict with 'X' [E, N, L], 'y', 'subject_id'
-        device: torch device
-        num_epochs_per_batch: Number of epochs to process at once
-
-    Returns:
-        prediction: Subject-level prediction
-        probability: Subject-level probability
-    """
-    model.eval()
-
-    X_all = subject_data['X']  # [E, N, L]
-    n_epochs = X_all.shape[0]
-
-    # Process in chunks
-    epoch_embeddings = []
-
-    with torch.no_grad():
-        for start_idx in range(0, n_epochs, num_epochs_per_batch):
-            end_idx = min(start_idx + num_epochs_per_batch, n_epochs)
-            X_chunk = X_all[start_idx:end_idx]  # [chunk_size, N, L]
-
-            # Add batch dimension
-            X_batch = X_chunk.unsqueeze(0).to(device)  # [1, chunk_size, N, L]
-
-            # Get epoch embeddings (before night pooling)
-            output = model(X_batch, return_intermediates=True)
-            u = output['intermediates']['u']  # [1, chunk_size, D]
-
-            epoch_embeddings.append(u.squeeze(0).cpu())  # [chunk_size, D]
-
-    # Concatenate all epoch embeddings
-    all_u = torch.cat(epoch_embeddings, dim=0)  # [E, D]
-
-    # Apply night pooling manually
-    # Use mean pooling for aggregation
-    z = all_u.mean(dim=0, keepdim=True).to(device)  # [1, D]
-
-    # Final classification
-    logit = model.classifier(z).cpu().item()
-    prob = torch.sigmoid(torch.tensor(logit)).item()
-    pred = 1 if prob > 0.5 else 0
-
-    return pred, prob
-
-
-def evaluate_subject_multisampling(model, subject_data, device,
-                                   num_samples=5, num_epochs_per_sample=128):
-    """
-    Evaluate subject using multiple random epoch samplings and average
-
-    Args:
-        model: ADHDClassifier model
-        subject_data: Dict with 'X' [E, N, L], 'y', 'subject_id'
-        device: torch device
-        num_samples: Number of random samplings
-        num_epochs_per_sample: Epochs per sampling
-
-    Returns:
-        prediction: Averaged subject-level prediction
-        probability: Averaged subject-level probability
-    """
-    model.eval()
-
-    X_all = subject_data['X']  # [E, N, L]
-    n_epochs = X_all.shape[0]
-
-    probabilities = []
-
-    with torch.no_grad():
-        for _ in range(num_samples):
-            # Random sample
-            if n_epochs > num_epochs_per_sample:
-                indices = torch.randperm(n_epochs)[:num_epochs_per_sample]
-                X_sample = X_all[indices]
-            else:
-                X_sample = X_all
-
-            # Add batch dimension
-            X_batch = X_sample.unsqueeze(0).to(device)  # [1, E_sampled, N, L]
-
-            # Forward pass
-            output = model(X_batch)
-            logit = output['logits'].squeeze().cpu().item()
-            prob = torch.sigmoid(torch.tensor(logit)).item()
-
-            probabilities.append(prob)
-
-    # Average probabilities
-    avg_prob = np.mean(probabilities)
-    pred = 1 if avg_prob > 0.5 else 0
-
-    return pred, avg_prob
-
-
-def create_collate_fn(num_epochs_sample=128, sampling_strategy='uniform'):
-    """
-    Create a collate function with fixed parameters
-
-    Args:
-        num_epochs_sample: Number of epochs to sample per subject
-        sampling_strategy: 'uniform', 'random', or 'stage_stratified'
+        max_epochs_per_batch: Maximum epochs per subject in a batch
 
     Returns:
         Collate function for DataLoader
     """
     def collate_wrapper(batch):
-        return collate_fn_adhd(batch, num_epochs_sample, sampling_strategy)
+        return collate_fn_adhd(batch, max_epochs_per_batch)
     return collate_wrapper
 
 
 def create_dataloaders(
     fif_directory: str,
-    batch_size: int = 8,
+    batch_size: int = 4,
     num_workers: int = 4,
-    num_epochs_sample: int = 128,
-    sampling_strategy: str = 'uniform',
+    max_epochs_per_batch: int = 256,
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = 42
 ) -> Tuple[DataLoader, DataLoader, DataLoader, Dict]:
     """
-    Create train/val/test dataloaders for ADHD classification
+    Create train/val/test dataloaders for ADHD classification with padding+masking
+
+    Args:
+        fif_directory: Directory containing .fif files
+        batch_size: Number of subjects per batch (default: 4)
+        num_workers: DataLoader workers
+        max_epochs_per_batch: Maximum epochs per subject (for memory control, default: 256)
+        train_ratio, val_ratio, test_ratio: Split ratios
+        seed: Random seed
 
     Returns:
         train_loader, val_loader, test_loader, metadata
@@ -459,8 +363,8 @@ def create_dataloaders(
     val_dataset = FIFDatasetADHD(fold_data, sleep_labels, adhd_labels, subject_ids, val_idx)
     test_dataset = FIFDatasetADHD(fold_data, sleep_labels, adhd_labels, subject_ids, test_idx)
 
-    # Create collate function with epoch sampling
-    collate_fn = create_collate_fn(num_epochs_sample, sampling_strategy)
+    # Create collate function with padding+masking
+    collate_fn = create_collate_fn(max_epochs_per_batch)
 
     # Create dataloaders
     train_loader = DataLoader(
@@ -490,6 +394,12 @@ def create_dataloaders(
         pin_memory=True
     )
 
+    # Calculate epoch statistics
+    all_epoch_counts = [fold_data[i].shape[0] for i in range(len(fold_data))]
+    avg_epochs = np.mean(all_epoch_counts)
+    max_epochs_dataset = np.max(all_epoch_counts)
+    min_epochs_dataset = np.min(all_epoch_counts)
+
     # Metadata
     metadata = {
         'n_subjects': n_subjects,
@@ -500,8 +410,10 @@ def create_dataloaders(
         'seq_len': train_dataset.n_samples,
         'adhd_count': int(np.sum(adhd_labels)),
         'control_count': int(len(adhd_labels) - np.sum(adhd_labels)),
-        'num_epochs_sample': num_epochs_sample,
-        'sampling_strategy': sampling_strategy
+        'max_epochs_per_batch': max_epochs_per_batch,
+        'avg_epochs_per_subject': avg_epochs,
+        'max_epochs_in_dataset': max_epochs_dataset,
+        'min_epochs_in_dataset': min_epochs_dataset
     }
 
     return train_loader, val_loader, test_loader, metadata

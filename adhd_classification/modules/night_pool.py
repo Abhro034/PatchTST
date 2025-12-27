@@ -86,11 +86,12 @@ class NightPool(nn.Module):
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}")
 
-    def forward(self, u, stage_labels=None, return_attention=False):
+    def forward(self, u, stage_labels=None, attention_mask=None, return_attention=False):
         """
         Args:
             u: [B, E, D] - epoch embeddings
             stage_labels: [B, E] - sleep stage labels (optional, for stage_aware)
+            attention_mask: [B, E] - mask for padded epochs (1=real, 0=padding)
             return_attention: If True, return attention weights
 
         Returns:
@@ -99,29 +100,59 @@ class NightPool(nn.Module):
         """
         B, E, D = u.shape
 
+        # Convert attention_mask to boolean if provided
+        if attention_mask is not None:
+            mask_bool = attention_mask.bool()  # [B, E]
+        else:
+            mask_bool = None
+
         if self.pool_type == 'mean':
-            # Simple mean pooling across epochs
-            z = u.mean(dim=1)  # [B, D]
+            # Masked mean pooling across epochs
+            if attention_mask is not None:
+                # Expand mask to match embedding dimension
+                mask_expanded = attention_mask.unsqueeze(-1)  # [B, E, 1]
+                # Masked sum
+                u_masked = u * mask_expanded  # [B, E, D]
+                z = u_masked.sum(dim=1) / (mask_expanded.sum(dim=1) + 1e-8)  # [B, D]
+            else:
+                z = u.mean(dim=1)  # [B, D]
             alpha = None
 
         elif self.pool_type == 'max':
-            # Max pooling across epochs
-            z = u.max(dim=1)[0]  # [B, D]
+            # Masked max pooling across epochs
+            if attention_mask is not None:
+                # Set padded positions to -inf before max
+                mask_expanded = attention_mask.unsqueeze(-1)  # [B, E, 1]
+                u_masked = u.masked_fill(mask_expanded == 0, float('-inf'))
+                z = u_masked.max(dim=1)[0]  # [B, D]
+                # Replace -inf with 0 if all epochs were masked (shouldn't happen)
+                z = torch.where(torch.isinf(z), torch.zeros_like(z), z)
+            else:
+                z = u.max(dim=1)[0]  # [B, D]
             alpha = None
 
         elif self.pool_type == 'attention':
-            # Attention-weighted pooling
+            # Masked attention-weighted pooling
             # Compute attention scores
             attn_scores = self.attention(u)  # [B, E, 1]
+
+            # Mask padding before softmax
+            if attention_mask is not None:
+                attn_scores = attn_scores.masked_fill(~mask_bool.unsqueeze(-1), float('-inf'))
+
             alpha = F.softmax(attn_scores, dim=1)  # [B, E, 1]
 
             # Weighted sum
             z = (u * alpha).sum(dim=1)  # [B, D]
 
         elif self.pool_type == 'topk':
-            # Top-k pooling
+            # Masked top-k pooling
             # Compute attention scores
             attn_scores = self.attention(u).squeeze(-1)  # [B, E]
+
+            # Mask padding before top-k selection
+            if attention_mask is not None:
+                attn_scores = attn_scores.masked_fill(~mask_bool, float('-inf'))
 
             # Get top-k indices
             k = min(self.k, E)
@@ -145,7 +176,7 @@ class NightPool(nn.Module):
                 alpha = full_alpha.unsqueeze(-1)  # [B, E, 1]
 
         elif self.pool_type == 'stage_aware':
-            # Stage-aware pooling
+            # Masked stage-aware pooling
             if stage_labels is None:
                 raise ValueError("stage_aware pooling requires stage_labels")
 
@@ -154,6 +185,10 @@ class NightPool(nn.Module):
             for stage_id in range(self.n_stages):
                 # Mask for current stage
                 stage_mask = (stage_labels == stage_id)  # [B, E]
+
+                # Combine with attention mask if provided
+                if attention_mask is not None:
+                    stage_mask = stage_mask & mask_bool
 
                 # Get epochs for this stage
                 # Create expanded mask
