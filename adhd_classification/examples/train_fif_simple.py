@@ -6,7 +6,12 @@ Train/val/test split without cross-validation for faster experimentation
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# Add parent directory to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 import torch
 import torch.nn as nn
