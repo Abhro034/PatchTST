@@ -103,8 +103,10 @@ def main():
     # Configuration
     config = {
         'fif_directory': './data/fif_files',  # UPDATE THIS PATH
-        'batch_size': 4,
+        'batch_size': 8,  # Can use larger batch sizes with epoch sampling!
         'num_workers': 0,
+        'num_epochs_sample': 128,  # Sample 128 epochs per subject per batch
+        'sampling_strategy': 'uniform',  # 'uniform', 'random', or 'stage_stratified'
         'step': 4,  # Model step (1-5)
         'num_epochs': 50,
         'lr': 1e-4,
@@ -132,10 +134,14 @@ def main():
         train_loader, val_loader, test_loader, metadata = create_dataloaders(
             fif_directory=config['fif_directory'],
             batch_size=config['batch_size'],
-            num_workers=config['num_workers']
+            num_workers=config['num_workers'],
+            num_epochs_sample=config['num_epochs_sample'],
+            sampling_strategy=config['sampling_strategy']
         )
     except Exception as e:
         print(f"\nERROR loading data: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     print(f"\nDataset info:")
@@ -145,6 +151,10 @@ def main():
     print(f"  Channels: {metadata['n_channels']}")
     print(f"  Sequence length: {metadata['seq_len']}")
     print(f"  ADHD: {metadata['adhd_count']}, Control: {metadata['control_count']}")
+    print(f"\n  Epoch Sampling:")
+    print(f"    Epochs per subject per batch: {metadata['num_epochs_sample']}")
+    print(f"    Sampling strategy: {metadata['sampling_strategy']}")
+    print(f"    Effective batch (values): {config['batch_size']} × {metadata['num_epochs_sample']} × {metadata['n_channels']} × {metadata['seq_len']}")
 
     # Create model
     print("\nCreating model...")
